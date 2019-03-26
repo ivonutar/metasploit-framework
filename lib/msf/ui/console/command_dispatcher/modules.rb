@@ -123,7 +123,7 @@ module Msf
                 if dump_json
                   print(Serializer::Json.dump_module(active_module) + "\n")
                 elsif show_doc
-                  f = Rex::Quickfile.new(["#{active_module.shortname}_doc", '.html'])
+                  f = Tempfile.new(["#{active_module.shortname}_doc", '.html'])
                   begin
                     print_status("Generating documentation for #{active_module.shortname}, then opening #{f.path} in a browser...")
                     Msf::Util::DocumentGenerator.spawn_module_document(active_module, f)
@@ -151,7 +151,7 @@ module Msf
               elsif dump_json
                 print(Serializer::Json.dump_module(mod) + "\n")
               elsif show_doc
-                f = Rex::Quickfile.new(["#{mod.shortname}_doc", '.html'])
+                f = Tempfile.new(["#{mod.shortname}_doc", '.html'])
                 begin
                   print_status("Generating documentation for #{mod.shortname}, then opening #{f.path} in a browser...")
                   Msf::Util::DocumentGenerator.spawn_module_document(mod, f)
@@ -327,7 +327,6 @@ module Msf
             print_line "Keywords:"
             {
               'aka'         => 'Modules with a matching AKA (also-known-as) name',
-              'app'         => 'Modules that are client or server attacks',
               'author'      => 'Modules written by this author',
               'arch'        => 'Modules affecting this architecture',
               'bid'         => 'Modules with a matching Bugtraq ID',
@@ -346,13 +345,13 @@ module Msf
               'ref'         => 'Modules with a matching ref',
               'reference'   => 'Modules with a matching reference',
               'target'      => 'Modules affecting this target',
-              'type'        => 'Modules of a specific type (exploit, payload, auxiliary, encoder, post, or nop)',
+              'type'        => 'Modules of a specific type (exploit, payload, auxiliary, encoder, evasion, post, or nop)',
             }.each_pair do |keyword, description|
               print_line "  #{keyword.ljust 12}:  #{description}"
             end
             print_line
             print_line "Examples:"
-            print_line "  search cve:2009 type:exploit app:client"
+            print_line "  search cve:2009 type:exploit"
             print_line
           end
 
@@ -537,7 +536,7 @@ module Msf
                   if (mod)
                     show_evasion_options(mod)
                   else
-                    print_error("No module selected.")
+                    show_evasion
                   end
                 when 'sessions'
                   if (active_module and active_module.respond_to?(:compatible_sessions))
@@ -551,7 +550,7 @@ module Msf
                 when "plugins"
                   show_plugins
                 when "targets"
-                  if (mod and mod.exploit?)
+                  if (mod and (mod.exploit? or mod.evasion?))
                     show_targets(mod)
                   else
                     print_error("No exploit module selected.")
@@ -654,6 +653,8 @@ module Msf
                 dispatcher = Msf::Ui::Console::CommandDispatcher::Auxiliary
               when Msf::MODULE_POST
                 dispatcher = Msf::Ui::Console::CommandDispatcher::Post
+              when Msf::MODULE_EVASION
+                dispatcher = Msf::Ui::Console::CommandDispatcher::Evasion
               else
                 print_error("Unsupported module type: #{mod.type}")
                 return false
@@ -808,23 +809,31 @@ module Msf
               cmd_reload_all_help
               return
             end
+
             print_status("Reloading modules from all module paths...")
             framework.modules.reload_modules
+
+            log_msg = "Please see #{File.join(Msf::Config.log_directory, 'framework.log')} for details."
 
             # Check for modules that failed to load
             if framework.modules.module_load_error_by_path.length > 0
               print_error("WARNING! The following modules could not be loaded!")
 
-              framework.modules.module_load_error_by_path.each do |path, error|
-                print_error("\t#{path}: #{error}")
+              framework.modules.module_load_error_by_path.each do |path, _error|
+                print_error("\t#{path}")
               end
+
+              print_error(log_msg)
             end
 
             if framework.modules.module_load_warnings.length > 0
               print_warning("The following modules were loaded with warnings:")
-              framework.modules.module_load_warnings.each do |path, error|
-                print_warning("\t#{path}: #{error}")
+
+              framework.modules.module_load_warnings.each do |path, _error|
+                print_warning("\t#{path}")
               end
+
+              print_warning(log_msg)
             end
 
             self.driver.run_single("banner")
@@ -980,7 +989,7 @@ module Msf
           def show_payloads(regex = nil, minrank = nil, opts = nil) # :nodoc:
             # If an active module has been selected and it's an exploit, get the
             # list of compatible payloads and display them
-            if (active_module and active_module.exploit? == true)
+            if (active_module and (active_module.exploit? == true or active_module.evasion?))
               show_module_set("Compatible Payloads", active_module.compatible_payloads, regex, minrank, opts)
             else
               show_module_set("Payloads", framework.payloads, regex, minrank, opts)
@@ -1018,6 +1027,10 @@ module Msf
             end
           end
 
+          def show_evasion(regex = nil, minrank = nil, opts = nil) # :nodoc:
+            show_module_set('evasion', framework.evasion, regex, minrank, opts)
+          end
+
           def show_global_options
             columns = [ 'Option', 'Current Setting', 'Description' ]
             tbl = Table.new(
@@ -1042,8 +1055,14 @@ module Msf
           end
 
           def show_targets(mod) # :nodoc:
-            mod_targs = Serializer::ReadableText.dump_exploit_targets(mod, '   ')
-            print("\nExploit targets:\n\n#{mod_targs}\n") if (mod_targs and mod_targs.length > 0)
+            case mod
+            when Msf::Exploit
+              mod_targs = Serializer::ReadableText.dump_exploit_targets(mod, '   ')
+              print("\nExploit targets:\n\n#{mod_targs}\n") if (mod_targs and mod_targs.length > 0)
+            when Msf::Evasion
+              mod_targs = Serializer::ReadableText.dump_evasion_targets(mod, '   ')
+              print("\nEvasion targets:\n\n#{mod_targs}\n") if (mod_targs and mod_targs.length > 0)
+            end
           end
 
           def show_actions(mod) # :nodoc:
@@ -1080,7 +1099,7 @@ module Msf
 
             # If it's an exploit and a payload is defined, create it and
             # display the payload's options
-            if (mod.exploit? and mod.datastore['PAYLOAD'])
+            if (mod.evasion? and mod.datastore['PAYLOAD'])
               p = framework.payloads.create(mod.datastore['PAYLOAD'])
 
               if (!p)
@@ -1100,7 +1119,7 @@ module Msf
           def show_plugins # :nodoc:
             tbl = Table.new(
               Table::Style::Default,
-              'Header'  => 'Plugins',
+              'Header'  => 'Loaded Plugins',
               'Prefix'  => "\n",
               'Postfix' => "\n",
               'Columns' => [ 'Name', 'Description' ]
@@ -1110,6 +1129,9 @@ module Msf
               tbl << [ plugin.name, plugin.desc ]
             }
 
+            # create an instance of core to call the list_plugins
+            core = Msf::Ui::Console::CommandDispatcher::Core.new(driver)
+            core.list_plugins
             print(tbl.to_s)
           end
 

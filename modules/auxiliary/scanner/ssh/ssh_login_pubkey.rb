@@ -53,7 +53,7 @@ class MetasploitModule < Msf::Auxiliary
       ]
     )
 
-    deregister_options('RHOST','PASSWORD','PASS_FILE','BLANK_PASSWORDS','USER_AS_PASS','USERPASS_FILE')
+    deregister_options('PASSWORD','PASS_FILE','BLANK_PASSWORDS','USER_AS_PASS','USERPASS_FILE')
 
     @good_key = ''
     @strip_passwords = true
@@ -91,6 +91,15 @@ class MetasploitModule < Msf::Auxiliary
 
     # Set the session platform
     s.platform = scanner.get_platform(result.proof)
+
+    # Create database host information
+    host_info = {host: scanner.host}
+
+    unless s.platform == 'unknown'
+      host_info[:os_name] = s.platform
+    end
+
+    report_host(host_info)
 
     s
   end
@@ -143,7 +152,7 @@ class MetasploitModule < Msf::Auxiliary
           create_credential_login(credential_data)
           tmp_key = result.credential.private
           ssh_key = SSHKey.new tmp_key
-          session_setup(result, scanner, ssh_key.fingerprint)
+          session_setup(result, scanner, ssh_key.fingerprint) if datastore['CreateSession']
           :next_user
         when Metasploit::Model::Login::Status::UNABLE_TO_CONNECT
           if datastore['VERBOSE']
